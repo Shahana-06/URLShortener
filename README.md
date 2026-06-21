@@ -2,7 +2,7 @@
 
 A production-style URL shortening service with JWT authentication, Redis caching, click analytics, and sliding window rate limiting.
 
-**Live API:** `https://URL Shortener.onrender.com`
+**Live API:** `https://urlshortener-7ky9.onrender.com`
 
 ## Tech Stack
 
