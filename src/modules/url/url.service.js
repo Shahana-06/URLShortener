@@ -1,31 +1,72 @@
-/**
- * url.service.js
- * Core business logic for URL shortening and resolution.
- *
- * createShortUrl flow:
- *   1. If alias provided → check uniqueness in PG
- *   2. INSERT row to get the auto-increment id back (RETURNING id)
- *   3. base62.encode(id) → short code
- *   4. UPDATE the row to set code = encoded value
- *   5. Cache: Redis SET url:{code} longUrl EX 86400
- *   6. Return { code, shortUrl }
- *
- * resolveCode flow:
- *   1. Redis GET url:{code}  → cache hit: return immediately
- *   2. Cache miss: PG SELECT WHERE code = ?
- *   3. If not found → throw AppError 404
- *   4. Redis SET url:{code} (warm cache for next time)
- *   5. Return longUrl
- */
-
 const db = require('../../config/db');
 const redis = require('../../config/redis');
 const base62 = require('../../utils/base62');
 const AppError = require('../../utils/AppError');
 
-// TODO: implement createShortUrl(longUrl, userId, alias)
-// TODO: implement resolveCode(code)
-// TODO: implement getUserUrls(userId)
-// TODO: implement deleteUrl(code, userId)
+const createShortUrl = async (longUrl, userId, customAlias) => {
+  // If custom alias provided, check it's not taken
+  if (customAlias) {
+    const existing = await db.query(
+      'SELECT id FROM urls WHERE alias = $1',
+      [customAlias]
+    );
+    if (existing.rows.length > 0) {
+      throw new AppError('That alias is already taken', 409);
+    }
+  }
 
-module.exports = {};
+  // Step 1 — INSERT row to get the auto-generated id
+  const result = await db.query(
+    `INSERT INTO urls (user_id, long_url, alias)
+     VALUES ($1, $2, $3)
+     RETURNING id`,
+    [userId, longUrl, customAlias || null]
+  );
+  const id = result.rows[0].id;
+
+  // Step 2 — Base62 encode the id to get the short code
+  const shortCode = base62.encode(Number(id));
+
+  // Step 3 — Write the short code back to the row
+  await db.query(
+    'UPDATE urls SET code = $1 WHERE id = $2',
+    [shortCode, id]
+  );
+
+  // Step 4 — Cache in Redis so redirects never hit the DB
+  await redis.set(`url:${shortCode}`, longUrl, 'EX', 86400);
+
+  return {
+    shortCode,
+    shortUrl: `${process.env.BASE_URL}/${shortCode}`,
+    longUrl,
+  };
+};
+
+const resolveCode = async (code) => {
+  // Check Redis cache first
+  const cached = await redis.get(`url:${code}`);
+  if (cached) return { longUrl: cached, fromCache: true };
+
+  // Cache miss — hit PostgreSQL
+  const result = await db.query(
+    `SELECT id, long_url FROM urls
+     WHERE (code = $1 OR alias = $1)
+       AND is_active = TRUE
+       AND (expires_at IS NULL OR expires_at > NOW())`,
+    [code]
+  );
+
+  if (result.rows.length === 0) {
+    throw new AppError('Short URL not found', 404);
+  }
+
+  const { long_url } = result.rows[0];
+
+  // Warm the cache for next time
+  await redis.set(`url:${code}`, long_url, 'EX', 86400);
+
+  return { longUrl: long_url, fromCache: false };
+};
+
+module.exports = { createShortUrl, resolveCode };
