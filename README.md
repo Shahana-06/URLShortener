@@ -1,0 +1,215 @@
+# URL Shortener + Analytics API
+
+A production-style URL shortening service with JWT authentication, Redis caching, click analytics, and sliding window rate limiting.
+
+**Live API:** `https://URL Shortener.onrender.com`
+
+## Tech Stack
+
+- **Runtime:** Node.js + Express
+- **Database:** PostgreSQL (Railway) — persistent storage for users, URLs, clicks
+- **Cache:** Redis (Railway) — URL resolution cache + rate limiting
+- **Auth:** JWT (jsonwebtoken + bcrypt)
+- **Deploy:** Render (app) + Railway (PostgreSQL + Redis)
+
+## Architecture
+
+```
+Client
+  │
+  ▼
+Express App (Render)
+  │
+  ├── JWT Middleware       → validates Bearer token on protected routes
+  ├── Rate Limiter         → Redis sliding window (10 req/min per user)
+  │
+  ├── POST /auth/register  → bcrypt hash → INSERT users → sign JWT
+  ├── POST /auth/login     → bcrypt compare → sign JWT
+  │
+  ├── POST /shorten        → INSERT urls → base62(id) → Redis SET
+  ├── GET  /:code          → Redis GET (cache hit) or PG SELECT (miss)
+  │                           → fire-and-forget click INSERT
+  │                           → 302 redirect
+  │
+  └── GET  /analytics/:code → verify ownership → aggregate clicks table
+```
+
+## API Endpoints
+
+### Auth
+
+```
+POST /auth/register
+Body: { "email": "user@example.com", "password": "password123" }
+Response: { "user": { "id", "email", "created_at" }, "token": "eyJ..." }
+
+POST /auth/login
+Body: { "email": "user@example.com", "password": "password123" }
+Response: { "user": { "id", "email" }, "token": "eyJ..." }
+```
+
+### URL Shortening
+
+```
+POST /shorten
+Headers: Authorization: Bearer <token>
+Body: { "longUrl": "https://example.com", "customAlias": "my-link" }
+Response: { "shortCode": "2lC", "shortUrl": "https://app.onrender.com/2lC", "longUrl": "..." }
+
+GET /:code
+Response: 302 redirect to original URL
+```
+
+### Analytics
+
+```
+GET /analytics/:code
+Headers: Authorization: Bearer <token>
+Response: {
+  "url": { "shortCode", "alias", "longUrl", "createdAt" },
+  "totalClicks": 42,
+  "clicksByDay": [{ "day": "2026-06-21", "clicks": "5" }],
+  "topReferrers": [{ "referrer": "https://twitter.com", "clicks": "3" }]
+}
+```
+
+## PostgreSQL Schema
+
+```sql
+CREATE TABLE users (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email       VARCHAR(255) UNIQUE NOT NULL,
+  password    VARCHAR(255) NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE urls (
+  id          BIGSERIAL PRIMARY KEY,        -- used for Base62 encoding
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  long_url    TEXT NOT NULL,
+  code        VARCHAR(12) UNIQUE,           -- base62(id)
+  alias       VARCHAR(50) UNIQUE,           -- optional custom alias
+  is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+  expires_at  TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE clicks (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  url_id      BIGINT NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+  clicked_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ip_address  INET,
+  user_agent  TEXT,
+  referrer    TEXT
+);
+```
+
+## Index Design + Query Performance
+
+### B-tree index on `urls.code`
+
+Every redirect hits `SELECT long_url FROM urls WHERE code = ?`.
+Without an index this is a full sequential scan.
+
+```sql
+-- Before index
+EXPLAIN ANALYZE SELECT long_url FROM urls WHERE code = '2lC';
+-- Seq Scan on urls (cost=0.00..1.01 rows=1 width=32) (actual time=0.018..0.019 rows=1 loops=1)
+-- Planning Time: 0.4ms  |  Execution Time: 0.04ms
+
+CREATE INDEX idx_urls_code ON urls USING BTREE (code);
+
+-- After index
+EXPLAIN ANALYZE SELECT long_url FROM urls WHERE code = '2lC';
+-- Index Scan using idx_urls_code on urls (cost=0.13..8.15 rows=1 width=32)
+-- Planning Time: 0.3ms  |  Execution Time: 0.02ms
+```
+
+At scale (millions of rows), the difference becomes O(n) vs O(log n).
+
+### Partial index on `urls.expires_at`
+
+Most URLs never expire — indexing all NULL values wastes space and slows writes.
+
+```sql
+CREATE INDEX idx_urls_expires_at ON urls USING BTREE (expires_at)
+WHERE expires_at IS NOT NULL;
+```
+
+This index only covers rows that actually have an expiry date, making cleanup jobs fast without any cost for the non-expiring majority.
+
+### B-tree index on `clicks.url_id`
+
+Analytics queries aggregate all clicks for a URL:
+```sql
+SELECT COUNT(*) FROM clicks WHERE url_id = ?
+```
+Without this index, every analytics call scans the entire clicks table.
+
+## Redis Usage
+
+**URL Cache**
+```
+Key:   url:{code}
+Value: long URL string
+TTL:   86400 seconds (24 hours)
+```
+
+**Sliding Window Rate Limiter**
+```
+Key:      ratelimit:{userId}
+Type:     Sorted Set (ZSET)
+Score:    request timestamp (ms)
+Window:   60 seconds
+Limit:    10 requests per window
+```
+
+Why sliding window over fixed window? Fixed windows allow bursting at boundaries
+(e.g. 10 req at 11:59:59 + 10 req at 12:00:00 = 20 req in 2 seconds).
+Sliding window counts requests within the last 60 seconds from NOW, eliminating that exploit.
+
+## Base62 Encoding
+
+Short codes are generated by Base62-encoding the PostgreSQL auto-increment row ID.
+
+```
+ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+encode(1)    → "1"
+encode(62)   → "z"
+encode(63)   → "10"
+encode(3844) → "100"
+```
+
+**Why not random strings?** Encoding the DB ID guarantees uniqueness with zero collision checking needed. The trade-off is a two-write pattern (INSERT → get id → UPDATE with encoded code).
+
+## Rate Limiting
+
+Redis sliding window rate limiter applied to `POST /shorten`:
+- 10 requests per 60-second window per authenticated user
+- Uses Redis ZADD + ZREMRANGEBYSCORE + ZCARD
+- Returns 429 Too Many Requests when limit exceeded
+- Redis failure is non-blocking (fails open to avoid false positives)
+
+## Local Setup
+
+```bash
+git clone https://github.com/Shahana-06/URLShortener.git
+cd URLShortener
+npm install
+cp .env.example .env
+# Fill in DATABASE_URL, REDIS_URL, JWT_SECRET, BASE_URL
+npm run migrate
+npm run dev
+```
+
+## Environment Variables
+
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `REDIS_URL` | Redis connection string |
+| `JWT_SECRET` | Secret key for signing JWTs |
+| `JWT_EXPIRES_IN` | Token expiry (e.g. 7d) |
+| `BASE_URL` | Public URL of the deployed app |
+| `NODE_ENV` | `development` or `production` |
