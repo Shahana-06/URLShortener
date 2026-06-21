@@ -1,13 +1,3 @@
-/**
- * auth.routes.js
- * Defines HTTP endpoints for authentication.
- * Keeps routing declarations separate from handling logic.
- *
- * Routes:
- *   POST /auth/register  — create a new user account
- *   POST /auth/login     — authenticate and receive JWT
- */
-
 const express = require('express');
 const { body } = require('express-validator');
 const authController = require('./auth.controller');
@@ -15,6 +5,34 @@ const validate = require('../../middleware/validate');
 
 const router = express.Router();
 
+/**
+ * @swagger
+ * /auth/register:
+ *   post:
+ *     summary: Register a new user
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password]
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 example: user@example.com
+ *               password:
+ *                 type: string
+ *                 example: password123
+ *     responses:
+ *       201:
+ *         description: User registered successfully
+ *       409:
+ *         description: Email already in use
+ *       422:
+ *         description: Validation error
+ */
 router.post(
   '/register',
   [
@@ -25,6 +43,32 @@ router.post(
   authController.register
 );
 
+/**
+ * @swagger
+ * /auth/login:
+ *   post:
+ *     summary: Login and receive JWT token
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password]
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 example: user@example.com
+ *               password:
+ *                 type: string
+ *                 example: password123
+ *     responses:
+ *       200:
+ *         description: Login successful, returns JWT
+ *       401:
+ *         description: Invalid credentials
+ */
 router.post(
   '/login',
   [

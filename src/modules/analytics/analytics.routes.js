@@ -1,20 +1,30 @@
-/**
- * analytics.routes.js
- *
- * Routes:
- *   GET /analytics/:code — authenticated — return click stats for a URL
- *
- * Authorization note: middleware verifies JWT, but the service layer must
- * additionally verify that the requesting user OWNS this URL. Don't rely
- * on authentication alone for ownership checks.
- */
-
 const express = require('express');
 const analyticsController = require('./analytics.controller');
 const authenticate = require('../../middleware/authenticate');
 
 const router = express.Router();
 
+/**
+ * @swagger
+ * /analytics/{code}:
+ *   get:
+ *     summary: Get click analytics for a short URL
+ *     tags: [Analytics]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: code
+ *         required: true
+ *         schema:
+ *           type: string
+ *         example: 2lC
+ *     responses:
+ *       200:
+ *         description: Analytics data
+ *       404:
+ *         description: URL not found or not owned by user
+ */
 router.get('/:code', authenticate, analyticsController.getAnalytics);
 
 module.exports = router;

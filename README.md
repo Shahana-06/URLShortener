@@ -2,7 +2,8 @@
 
 A production-style URL shortening service with JWT authentication, Redis caching, click analytics, and sliding window rate limiting.
 
-**Live API:** `https://urlshortener-7ky9.onrender.com`
+**Live API:** https://urlshortener-7ky9.onrender.com
+**Swagger Docs:** https://urlshortener-7ky9.onrender.com/api-docs
 
 ## Tech Stack
 
@@ -98,7 +99,7 @@ CREATE TABLE clicks (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   url_id      BIGINT NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
   clicked_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  ip_address  INET,
+  ip_address  TEXT,           -- SHA-256 hashed for privacy
   user_agent  TEXT,
   referrer    TEXT
 );
