@@ -1,15 +1,19 @@
 const db = require('../../config/db');
 const AppError = require('../../utils/AppError');
+const crypto = require('crypto');
 
 const recordClick = async (urlId, req) => {
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  const rawIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  const hashedIp = rawIp
+    ? crypto.createHash('sha256').update(rawIp).digest('hex')
+    : null;
   const userAgent = req.headers['user-agent'] || null;
   const referrer = req.headers['referer'] || null;
 
   await db.query(
     `INSERT INTO clicks (url_id, ip_address, user_agent, referrer)
      VALUES ($1, $2, $3, $4)`,
-    [urlId, ip, userAgent, referrer]
+    [urlId, hashedIp, userAgent, referrer]
   );
 };
 
